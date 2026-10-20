@@ -144,7 +144,7 @@
 </div>
 
 <script>
-const DATOS = __DATOS__;
+let DATOS = __DATOS__;
 const META = __META__;
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const suma = a => a.reduce((s, x) => s + (x || 0), 0);
@@ -155,8 +155,13 @@ const precioPuesto = x => x.estado !== "Rentado" ? 0 : (x.precio != null ? x.pre
 const esEstimado = x => x.estado === "Rentado" && x.precio == null;
 const ocupante = x => x.estado === "Rentado" ? (x.empresa || "Sin dato") : "Libres";
 
-const PISOS = [...new Set(DATOS.map(x => x.piso).filter(Boolean))].sort((a, b) => (parseInt(a) || 0) - (parseInt(b) || 0));
 let pisoSel = "Todos";
+let PISOS = [];
+function calcularPisos() {
+  PISOS = [...new Set(DATOS.map(x => x.piso).filter(Boolean))].sort((a, b) => (parseInt(a) || 0) - (parseInt(b) || 0));
+  if (pisoSel !== "Todos" && !PISOS.includes(pisoSel)) pisoSel = "Todos";
+}
+
 const base = () => DATOS.filter(x => pisoSel === "Todos" || x.piso === pisoSel);
 let TOTALES, OCUPANTES;
 function recalcular() {
@@ -281,13 +286,91 @@ function tabla() {
 }
 
 function actualizar() {
+  calcularPisos();
   recalcular();
   chips();
   for (const fn of [indicadores, mapa, grafico, tabla]) { try { fn(); } catch (e) { console.error(e); } }
 }
-document.getElementById("meta").textContent = `${fmt(suma(DATOS.map(x => x.cant)))} puestos${PISOS.length > 1 ? " en " + PISOS.length + " coworkings" : ""} · Actualizado ${META.actualizado}`;
-document.getElementById("pie").textContent = "Datos de data/coworking.csv. El tablero se regenera automáticamente al actualizar el archivo.";
+// ---------- lectura en vivo desde Google Sheets ----------
+// Misma limpieza que build.py, para que los datos en vivo queden iguales a los generados.
+const NULOS = new Set(["", "na", "n/a", "nd", "s/d", "-", "nan"]);
+const MINUS = new Set(["de", "del", "la", "el", "y", "en"]);
+const sinTildes = t => t.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+const limpio = v => { const t = String(v ?? "").replace(/\s+/g, " ").trim(); return NULOS.has(t.toLowerCase()) ? "" : t; };
+const prolijo = t => (t !== t.toUpperCase() || t === t.toLowerCase() || t.length <= 4) ? t
+  : t.toLowerCase().split(" ").map((p, i) => i && MINUS.has(p) ? p : p.charAt(0).toUpperCase() + p.slice(1)).join(" ");
+const pisoNombre = p => { const m = p.match(/\d+/); return m ? `${m[0]}° piso` : (/^(pb|planta baja)$/i.test(p) ? "Planta baja" : p); };
+
+function parseCSV(texto) {
+  const filas = []; let fila = [], campo = "", comillas = false;
+  texto = texto.replace(/^\uFEFF/, "");
+  for (let i = 0; i < texto.length; i++) {
+    const c = texto[i];
+    if (comillas) {
+      if (c === '"') { if (texto[i + 1] === '"') { campo += '"'; i++; } else comillas = false; }
+      else campo += c;
+    } else if (c === '"') comillas = true;
+    else if (c === ",") { fila.push(campo); campo = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && texto[i + 1] === "\n") i++;
+      fila.push(campo); filas.push(fila); fila = []; campo = "";
+    } else campo += c;
+  }
+  if (campo || fila.length) { fila.push(campo); filas.push(fila); }
+  return filas.filter(f => f.some(x => x.trim() !== ""));
+}
+
+function normalizar(filas) {
+  const enc = filas[0].map(h => sinTildes(h.trim()).toLowerCase());
+  const col = (...ops) => { for (const o of ops) { const i = enc.findIndex(h => h.startsWith(o)); if (i >= 0) return i; } return -1; };
+  const iCod = col("codigo"), iPiso = col("piso"), iEmp = col("empresa"), iEst = col("estado"), iCant = col("cantpuestos", "puestos"), iPre = col("precio", "mtec");
+  if (iEst < 0 && iEmp < 0) throw new Error("La planilla no tiene las columnas esperadas (Empresa / Estado)");
+  const num = v => { const n = parseFloat(limpio(v).replace(",", ".")); return isNaN(n) ? null : n; };
+  return filas.slice(1).map(f => {
+    let emp = iEmp >= 0 ? limpio(f[iEmp]) : "";
+    if (["sin asignar", "libre", "vacante"].includes(emp.replace(/[()]/g, "").toLowerCase())) emp = "";
+    const est = iEst >= 0 ? sinTildes(limpio(f[iEst])).toUpperCase() : "";
+    const estado = { RENTADO: "Rentado", ALQUILADO: "Rentado", OCUPADO: "Rentado", LIBRE: "Libre", DISPONIBLE: "Libre" }[est] || (emp ? "Rentado" : "Libre");
+    const cant = iCant >= 0 ? num(f[iCant]) : null;
+    const piso = iPiso >= 0 ? limpio(f[iPiso]) : "";
+    return { codigo: iCod >= 0 ? limpio(f[iCod]) : "", empresa: prolijo(emp), piso: piso ? pisoNombre(piso) : "", estado,
+             cant: cant ? Math.round(cant) : 1, cantCargada: !!cant, precio: iPre >= 0 ? num(f[iPre]) : null };
+  }).filter(x => x.codigo || x.empresa || x.estado);
+}
+
+function recalcularFaltan() {
+  META.faltan = { cant: DATOS.filter(x => !x.cantCargada).length, precio: DATOS.filter(x => x.estado === "Rentado" && x.precio == null).length,
+                  hayColumnaPrecio: META.faltan.hayColumnaPrecio || DATOS.some(x => x.precio != null) };
+}
+function mostrarFuente(texto) {
+  document.getElementById("meta").textContent =
+    `${fmt(suma(DATOS.map(x => x.cant)))} puestos${PISOS.length > 1 ? " en " + PISOS.length + " coworkings" : ""} · ${texto}`;
+}
+
+async function leerEnVivo() {
+  if (!META.fuenteUrl) return;
+  try {
+    const r = await fetch(META.fuenteUrl, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const datos = normalizar(parseCSV(await r.text()));
+    if (!datos.length) throw new Error("planilla vacía");
+    DATOS = datos;
+    recalcularFaltan();
+    actualizar();
+    const h = new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false });
+    mostrarFuente(`En vivo desde Google Sheets · leído a las ${h}`);
+  } catch (e) {
+    console.warn("No se pudo leer la planilla en vivo:", e);
+    mostrarFuente(`Datos guardados del ${META.actualizado} (no se pudo leer la planilla en vivo)`);
+  }
+}
+
+calcularPisos();
+mostrarFuente(META.fuenteUrl ? "Leyendo la planilla…" : `Actualizado ${META.actualizado}`);
+document.getElementById("pie").textContent = META.fuenteUrl ? "Los datos se leen en vivo de la planilla de Google Sheets cada vez que se abre la página (Google puede demorar unos 5 minutos en reflejar los cambios). Si no se puede leer, se muestran los últimos datos guardados." : "Datos de data/coworking.csv. El tablero se regenera automáticamente al actualizar el archivo.";
 actualizar();
+leerEnVivo();
+setInterval(leerEnVivo, 5 * 60 * 1000);  // si la página queda abierta, vuelve a leer cada 5 minutos
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", actualizar);
 let t; addEventListener("resize", () => { clearTimeout(t); t = setTimeout(actualizar, 250); });
 </script>

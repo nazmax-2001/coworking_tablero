@@ -23,6 +23,10 @@ SALIDA = BASE / "docs" / "index.html"
 PLOTLY = BASE / "vendor" / "plotly-basic.min.js"
 LOGO = BASE / "assets" / "logo.png"
 
+# Planilla de Google Sheets publicada como CSV (Archivo → Compartir → Publicar en la Web → .csv).
+# El tablero la lee en vivo cada vez que se abre. Si se deja vacío, solo usa data/coworking.csv.
+GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSGOwzKPv6FS1to9S1a0AxoYhDmlmi9wEk31pqid1Sx0w6Gk8u3EgfMLVHivXYnwQ/pub?gid=1638921863&single=true&output=csv"
+
 # Precio de referencia por puesto (MTEC por mes), del tarifario de MiradorTEC.
 # Se usa para estimar cuánto podrían generar los puestos libres. Cambiarlo acá si se actualiza la tarifa.
 TARIFA_REFERENCIA = 120
@@ -88,7 +92,18 @@ def piso_nombre(p: str) -> str:
 
 
 def main() -> None:
-    cw = leer(COWORKING)
+    # Datos de respaldo (los que se ven si la planilla no responde): se intenta traer la versión
+    # más nueva de Google Sheets; si no se puede (sin internet, link roto), se usa data/coworking.csv.
+    cw = None
+    if GOOGLE_SHEET_CSV:
+        try:
+            cw = leer(GOOGLE_SHEET_CSV)
+            cw.to_csv(COWORKING, index=False, encoding="utf-8-sig")  # guarda una copia local
+            print("Datos leídos de Google Sheets")
+        except Exception as e:
+            print(f"No se pudo leer Google Sheets ({e}); se usa {COWORKING.name}")
+    if cw is None:
+        cw = leer(COWORKING)
     c_cod, c_emp, c_est = col(cw, "Codigo"), col(cw, "Empresa"), col(cw, "Estado")
     c_piso = col(cw, "Piso")
     c_cant, c_precio = col(cw, "CantPuestos", "Puestos"), col(cw, "Precio", "MTEC")
@@ -115,6 +130,7 @@ def main() -> None:
     meta = {
         "actualizado": datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).strftime("%d/%m/%Y %H:%M"),
         "tarifaRef": TARIFA_REFERENCIA,
+        "fuenteUrl": GOOGLE_SHEET_CSV,
         "faltan": {
             "cant": sum(1 for x in puestos if not x["cantCargada"]),
             "precio": sum(1 for x in puestos if x["estado"] == "Rentado" and not x["precio"]),
